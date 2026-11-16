@@ -1,0 +1,1 @@
+# ConcBot proguard rules

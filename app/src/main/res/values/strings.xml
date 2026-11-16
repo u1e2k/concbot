@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">ConcBot</string>
+    <string name="accessibility_service_description">ConcBotの自動操作を実行するためのユーザー補助サービスです。NFCタグやトリガーによるWi-Fiテザリング等の切り替えを自動化します。</string>
+    <string name="status_service_running">ユーザー補助サービス: 有効 (稼働中)</string>
+    <string name="status_service_disabled">ユーザー補助サービス: 無効 (タップして有効化)</string>
+    <string name="btn_open_accessibility">ユーザー補助設定を開く</string>
+    <string name="btn_test_tether_toggle">テザリング切替 (テスト実行)</string>
+    <string name="nfc_writer_title">NFCタグ書き込み</string>
+    <string name="nfc_writer_desc">「書き込み待機開始」を押してNFCタグ（NTAG213/215等）を端末背面にかざすと、テザリング切替トリガー（concbot://action/tether_toggle）を書き込みます。</string>
+    <string name="btn_start_nfc_write">NFCタグ書き込み待機を開始</string>
+    <string name="btn_stop_nfc_write">書き込み待機をキャンセル</string>
+    <string name="nfc_waiting_message">タグを端末背面にかざしてください…</string>
+    <string name="nfc_write_success">NFCタグへの書き込みが完了しました！</string>
+    <string name="nfc_write_failed">NFCタグへの書き込みに失敗しました: %1$s</string>
+    <string name="nfc_not_supported">この端末はNFCに対応していません</string>
+    <string name="nfc_disabled">NFCが無効です。設定で有効にしてください</string>
+</resources>
