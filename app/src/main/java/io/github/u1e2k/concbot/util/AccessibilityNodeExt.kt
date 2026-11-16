@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * AccessibilityNodeInfo 操作に関する拡張関数群。
@@ -12,49 +11,53 @@ import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * 画面のアクティブルートノードを多角的に取得する。
- * targetPackage が指定されている場合、そのパッケージのウィンドウが現れるまで待機（他アプリウィンドウの誤認を防止）。
+ * rootInActiveWindow, event.source, windows リストの順に対象パッケージを探索。
  */
 fun getActiveRootNode(
     service: AccessibilityService,
     event: AccessibilityEvent?,
     targetPackage: String? = null
 ): AccessibilityNodeInfo? {
+    // 1. rootInActiveWindow（最も確実）
     try {
-        val windows = service.windows
-
-        // 1. targetPackage が指定されている場合、そのパッケージのウィンドウのみを厳格に探索
-        if (targetPackage != null) {
-            for (w in windows) {
-                val r = w.root
-                if (r != null && r.packageName?.toString() == targetPackage) {
-                    return r
-                }
-            }
-            // event.source が対象パッケージの場合
-            val eventSource = event?.source
-            if (eventSource != null && eventSource.packageName?.toString() == targetPackage) {
-                return eventSource
-            }
-            // まだ対象パッケージが開いていない場合は null を返しリトライさせる
-            return null
-        }
-
-        // targetPackage 未指定時のフォールバック
-        for (w in windows) {
-            if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                val r = w.root
-                if (r != null && r.packageName?.toString() != "com.android.systemui") return r
-            }
-        }
-
-        for (w in windows) {
-            if (w.isActive || w.isFocused) {
-                val r = w.root
-                if (r != null && r.packageName?.toString() != "com.android.systemui") return r
+        val activeRoot = service.rootInActiveWindow
+        if (activeRoot != null) {
+            val pkg = activeRoot.packageName?.toString()
+            if (targetPackage == null || pkg == targetPackage) {
+                return activeRoot
             }
         }
     } catch (t: Throwable) {
-        Log.w("AccessibilityNodeExt", "Error getting active root node", t)
+        Log.w("AccessibilityNodeExt", "Error getting rootInActiveWindow", t)
+    }
+
+    // 2. event.source
+    try {
+        val eventSource = event?.source
+        if (eventSource != null) {
+            val pkg = eventSource.packageName?.toString()
+            if (targetPackage == null || pkg == targetPackage) {
+                return eventSource
+            }
+        }
+    } catch (t: Throwable) {
+        Log.w("AccessibilityNodeExt", "Error getting event.source", t)
+    }
+
+    // 3. windows リスト
+    try {
+        val windows = service.windows
+        if (!windows.isNullOrEmpty()) {
+            for (w in windows) {
+                val r = w.root ?: continue
+                val pkg = r.packageName?.toString()
+                if (targetPackage == null || pkg == targetPackage) {
+                    return r
+                }
+            }
+        }
+    } catch (t: Throwable) {
+        Log.w("AccessibilityNodeExt", "Error getting windows list", t)
     }
 
     return null
