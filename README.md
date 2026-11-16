@@ -123,3 +123,30 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 1. `AutomationAction` を実装した新しいクラス（例: `BluetoothToggleAction`）を `action/impl/` に作成。
 2. `ActionDispatcher.kt` の `actionFactories` マップにアクション ID とファクトリを登録。
 3. NFC タグに `concbot://action/{追加したaction_id}` を書き込むか、UI から dispatch を呼ぶだけで動作します。
+
+---
+
+## 🛠️ 開発の気苦労と裏話（Behind the Scenes）
+
+「NFC タグをかざしてテザリングを切り替えるだけ」……言葉にすれば一行ですが、**root も Shizuku も使わずに Android 15/16 (Pixel 9a) で 100% 確実に動かす** には、数々の泥臭い罠と戦う必要がありました。ここにその気苦労の記録を残しておきます。
+
+### 1. 市販 NTAG タグ書き込みの罠（「NDEF非対応」の絶望）
+- **現象**: 買ってきたばかりの NTAG213 / NTAG215 に書き込もうとすると、`Tag does not support NDEF` で尽く失敗。
+- **原因**: NFC Reader Mode の設定フラグに `FLAG_READER_SKIP_NDEF_CHECK` を入れていたため、OS が NDEF をチェックせず単なる raw タグとして返していたという罠。
+- **追い討ち**: さらに完全未フォーマットの生タグだと `NdefFormatable` すら失敗する場合がある。
+- **解決策**: フラグを修正した上で、`Ndef` 取得 → 失敗なら `NdefFormatable` → それでもダメなら `MifareUltralight` でページ 3（Capability Container）を直接バイナリ書き換えして強引に NDEF フォーマットする **執念の 3 段構えフォールバック** を実装。
+
+### 2. Android 14/15/16 のバックグラウンド画面起動制限（BAL）の壁
+- **現象**: NFC を検知して設定画面を開こうとしても、OS に「バックグラウンドからの Activity 起動は禁止」と握りつぶされる。
+- **解決策**: 通常の `ApplicationContext` からではなく、システム特権を持つ `AccessibilityService.startActivity()` を経由して起動することで制限を合法的にバイパス。
+
+### 3. 「動く時とだめな時がある」原因：設定アプリのスタック地獄
+- **現象**: ホーム画面から実行すると成功するのに、連続でかざしたり、直前に設定アプリを開いているとタイムアウトして失敗する。
+- **原因**: 従来は「アクセス ポイントとテザリング（親画面）」を開いてから「Wi-Fi アクセス ポイント（サブ画面）」の行をクリックして進んでいた。しかし設定アプリがバックグラウンドに生きていた場合、前回のスタック状態によって画面遷移イベントが飛んでこなかったり、戻るキーを何回押せば元のアプリに戻れるかが変動して迷子になっていた。
+- **解決策**: 親画面を経由するのを全廃し、トグルスイッチが鎮座する詳細画面 `com.android.settings.Settings$WifiTetherSettingsActivity` を **直接インテントで 1 発起動**。これにより遷移待ちがなくなり、戻るキーも「1回」で確定。
+
+### 4. 「Wi-Fi アクセス ポイントの使用」vs「使用する」の罠
+- **現象**: サブ画面が開いているのにスイッチを押してくれない。
+- **原因**: AOSP 等の定番キーワード「Wi-Fi アクセス ポイントの使用」で探していたが、実機 Pixel 9a の画面階層（XML）をダンプしてみると、テキストが動詞形の **「Wi-Fi アクセス ポイントを使用する」** だった（「する」が付いていた！）。
+- **さらなる罠**: スイッチ要素（Switch）そのものは `clickable=false` であり、外枠の `com.android.settings:id/switch_bar`（LinearLayout）がクリックを受け付ける構造になっていた。
+- **解決策**: `switch_bar` の ID を最優先でダイレクト捕捉してクリックするように改修。結果、**実行開始からトグル完了までわずか 0.1〜0.2 秒という超神速** を叩き出すことに成功。
