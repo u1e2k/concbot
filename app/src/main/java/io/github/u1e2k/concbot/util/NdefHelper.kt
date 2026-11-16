@@ -34,12 +34,16 @@ object NdefHelper {
     }
 
     /**
-     * NFC タグに NdefMessage を書き込む（Ndef または NdefFormatable に対応）
+     * NFC タグに NdefMessage を書き込む
+     * 1. Ndef インスタンスでの通常書き込み
+     * 2. NdefFormatable でのフォーマット書き込み
+     * 3. 未フォーマット NTAG (MifareUltralight) への直接低レベル書き込みフォールバック
      */
     fun writeMessage(tag: Tag, message: NdefMessage): WriteResult {
         val techList = tag.techList.map { it.substringAfterLast('.') }
         Log.i(TAG, "Discovered Tag TechList: $techList")
 
+        // 1. Ndef 経由の書き込み
         val ndef = Ndef.get(tag)
         if (ndef != null) {
             try {
@@ -65,6 +69,7 @@ object NdefHelper {
             }
         }
 
+        // 2. NdefFormatable 経由のフォーマット書き込み
         val formatable = NdefFormatable.get(tag)
         if (formatable != null) {
             try {
@@ -80,15 +85,85 @@ object NdefHelper {
             }
         }
 
-        // NDEF非対応タグの場合（SuicaなどのFeliCaやMifare Classicなど）
+        // 3. MifareUltralight (NTAG213/215/216) 直接フォーマット・書き込みフォールバック
+        val ultralight = MifareUltralight.get(tag)
+        if (ultralight != null) {
+            Log.i(TAG, "Attempting low-level write via MifareUltralight for NTAG...")
+            val directResult = writeNtagDirect(ultralight, message)
+            if (directResult is WriteResult.Success) {
+                Log.i(TAG, "Successfully wrote NTAG directly via MifareUltralight")
+                return directResult
+            }
+        }
+
+        // 失敗時の診断情報
         val detailedTech = techList.joinToString(", ")
         val errorReason = when {
-            detailedTech.contains("NfcF", ignoreCase = true) -> "交通系IC/電子マネー等のFeliCaタグには書き込めません (対応: NTAG213/215等)"
-            detailedTech.contains("MifareClassic", ignoreCase = true) -> "Mifare Classic タグは非対応です (NTAG系をご使用ください)"
+            detailedTech.contains("NfcF", ignoreCase = true) -> "交通系IC/電子マネー等のFeliCaタグには書き込めません"
+            detailedTech.contains("MifareClassic", ignoreCase = true) -> "Mifare Classic タグは非対応です"
             else -> "NDEF規格非対応のタグです (検出: $detailedTech)"
         }
         Log.w(TAG, errorReason)
         return WriteResult.Error(errorReason)
+    }
+
+    /**
+     * 未初期化の NTAG213/215/216 に対して Capability Container (CC) と NDEF TLV を直接書き込む
+     */
+    private fun writeNtagDirect(ultralight: MifareUltralight, message: NdefMessage): WriteResult {
+        try {
+            ultralight.connect()
+
+            val ndefBytes = message.toByteArray()
+            // TLVヘッダ: 0x03 (NDEF Message TLV), Length, [Payload], 0xFE (Terminator TLV)
+            val tlvList = mutableListOf<Byte>()
+            tlvList.add(0x03.toByte())
+            if (ndefBytes.size < 0xFF) {
+                tlvList.add(ndefBytes.size.toByte())
+            } else {
+                tlvList.add(0xFF.toByte())
+                tlvList.add(((ndefBytes.size shr 8) and 0xFF).toByte())
+                tlvList.add((ndefBytes.size and 0xFF).toByte())
+            }
+            for (b in ndefBytes) {
+                tlvList.add(b)
+            }
+            tlvList.add(0xFE.toByte()) // Terminator
+
+            // 4バイト（1ページ）単位にパディング
+            while (tlvList.size % 4 != 0) {
+                tlvList.add(0x00.toByte())
+            }
+
+            // Page 3: Capability Container (CC) を書き込む
+            // E1 (Magic), 10 (Version 1.0), 12 (NTAG213: 144B = 18*8), 00 (Read/Write)
+            // 既存のCCが有効なら上書きせずそのまま使う
+            val existingCc = ultralight.readPages(3)
+            if (existingCc[0] != 0xE1.toByte()) {
+                val defaultCc = byteArrayOf(0xE1.toByte(), 0x10.toByte(), 0x12.toByte(), 0x00.toByte())
+                ultralight.writePage(3, defaultCc)
+            }
+
+            // Page 4 以降に TLV データを 4 バイトずつ書き込む
+            var page = 4
+            for (i in tlvList.indices step 4) {
+                val pageData = byteArrayOf(
+                    tlvList[i],
+                    tlvList[i + 1],
+                    tlvList[i + 2],
+                    tlvList[i + 3]
+                )
+                ultralight.writePage(page, pageData)
+                page++
+            }
+
+            return WriteResult.Success
+        } catch (t: Throwable) {
+            Log.e(TAG, "Direct NTAG write failed", t)
+            return WriteResult.Error("NTAG直接書き込みエラー: ${t.localizedMessage ?: t.javaClass.simpleName}")
+        } finally {
+            try { ultralight.close() } catch (_: Throwable) {}
+        }
     }
 
     /**

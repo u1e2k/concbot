@@ -14,11 +14,12 @@ import io.github.u1e2k.concbot.util.clickAncestral
 import io.github.u1e2k.concbot.util.findClickableAncestor
 import io.github.u1e2k.concbot.util.findFirstSwitch
 import io.github.u1e2k.concbot.util.findNearbySwitch
+import io.github.u1e2k.concbot.util.getActiveRootNode
+import io.github.u1e2k.concbot.util.isSwitchNode
 
 /**
  * Wi-Fiテザリング（アクセスポイント）の自動切り替えアクション。
- * Pixel 9a (Android 15/16) のテザリング設定画面のUI構造に対応し、
- * 1段階トグルまたは2段階サブ画面遷移トグルの両方を自動判定してスイッチを切り替えます。
+ * イベント検知 + 定期ポーリングのリトライループにより、描画遅延に左右されず確実に操作します。
  */
 class TetherToggleAction : AutomationAction {
 
@@ -29,19 +30,35 @@ class TetherToggleAction : AutomationAction {
         private set
 
     private enum class Step {
-        WAITING_INITIAL_SCREEN,
-        WAITING_SUB_SCREEN,
+        INITIAL_SCREEN,
+        SUB_SCREEN,
         COMPLETED
     }
 
-    private var currentStep = Step.WAITING_INITIAL_SCREEN
+    private var currentStep = Step.INITIAL_SCREEN
     private var depthCount = 1
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val timeoutRunnable = Runnable {
         if (isRunning) {
-            Log.w(TAG, "TetherToggleAction timed out (${TIMEOUT_MS}ms)")
+            Log.w(TAG, "TetherToggleAction timed out (${TIMEOUT_MS}ms) at step: $currentStep")
             ConcAccessibilityService.instance?.let { onTimeout(it) }
+        }
+    }
+
+    // ノード描画待ちのための定期ポーリング用 Runnable
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            if (!isRunning || currentStep == Step.COMPLETED) return
+
+            val service = ConcAccessibilityService.instance
+            if (service != null) {
+                checkAndProcessWindow(service, null)
+            }
+
+            if (isRunning && currentStep != Step.COMPLETED) {
+                mainHandler.postDelayed(this, POLL_INTERVAL_MS)
+            }
         }
     }
 
@@ -51,14 +68,19 @@ class TetherToggleAction : AutomationAction {
             return
         }
         isRunning = true
-        currentStep = Step.WAITING_INITIAL_SCREEN
+        currentStep = Step.INITIAL_SCREEN
         depthCount = 1
 
         mainHandler.postDelayed(timeoutRunnable, TIMEOUT_MS)
 
-        if (!TetherSettingsLauncher.launch(context)) {
+        Log.i(TAG, "Starting TetherToggleAction, launching settings via AccessibilityService...")
+        if (!TetherSettingsLauncher.launch(service)) {
             cancel()
+            return
         }
+
+        // 起動直後からポーリング開始
+        mainHandler.postDelayed(pollRunnable, 100)
     }
 
     override fun onAccessibilityEvent(
@@ -67,81 +89,115 @@ class TetherToggleAction : AutomationAction {
     ): Boolean {
         if (!isRunning || currentStep == Step.COMPLETED) return true
 
-        val rootNode = service.rootInActiveWindow ?: return false
-
-        try {
-            when (currentStep) {
-                Step.WAITING_INITIAL_SCREEN -> handleInitialScreen(rootNode, service)
-                Step.WAITING_SUB_SCREEN -> handleSubScreen(rootNode, service)
-                Step.COMPLETED -> return true
-            }
-        } finally {
-            @Suppress("DEPRECATION")
-            rootNode.recycle()
-        }
+        checkAndProcessWindow(service, event)
 
         return currentStep == Step.COMPLETED
     }
 
-    private fun handleInitialScreen(root: AccessibilityNodeInfo, service: ConcAccessibilityService) {
-        // 1. 直下のスイッチ探索
-        val directSwitch = findHotspotSwitch(root)
-        if (directSwitch != null && directSwitch.clickAncestral()) {
-            Log.d(TAG, "Direct switch clicked")
-            finishWithFeedback(service)
+    @Synchronized
+    private fun checkAndProcessWindow(service: ConcAccessibilityService, event: AccessibilityEvent?) {
+        if (!isRunning || currentStep == Step.COMPLETED) return
+
+        val rootNode = getActiveRootNode(service, event, "com.android.settings")
+        if (rootNode == null) {
+            // まだ設定画面が開いていない
             return
         }
 
-        // 2. スイッチがない場合、サブ画面へ遷移
-        val hotspotItem = findHotspotNavigationItem(root)
-        if (hotspotItem != null && hotspotItem.clickAncestral()) {
-            Log.d(TAG, "Opening hotspot sub-screen")
-            currentStep = Step.WAITING_SUB_SCREEN
-            depthCount = 2
+        try {
+            when (currentStep) {
+                Step.INITIAL_SCREEN -> handleInitialScreen(rootNode, service)
+                Step.SUB_SCREEN -> handleSubScreen(rootNode, service)
+                Step.COMPLETED -> return
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error processing window nodes", t)
+        } finally {
+            @Suppress("DEPRECATION")
+            rootNode.recycle()
+        }
+    }
+
+    private fun handleInitialScreen(root: AccessibilityNodeInfo, service: ConcAccessibilityService) {
+        // 1. ピンポイントで「Wi-Fi アクセス ポイント」項目を探す
+        val targetNode = findWifiHotspotTitleNode(root)
+        if (targetNode == null) {
+            Log.d(TAG, "Hotspot title node not yet rendered")
+            return
+        }
+
+        Log.i(TAG, "Found target title node: '${targetNode.text}'")
+
+        // 2. 直下にスイッチがあるか（他機種向け）
+        val directSwitch = targetNode.findNearbySwitch()
+        if (directSwitch != null && directSwitch.isSwitchNode()) {
+            Log.i(TAG, "Direct switch found near title node, clicking switch...")
+            if (directSwitch.clickAncestral()) {
+                finishWithFeedback(service)
+                return
+            }
+        }
+
+        // 3. スイッチがない場合（Pixel標準）、行をクリックしてサブ画面へ遷移
+        val clickableRow = targetNode.findClickableAncestor()
+        if (clickableRow != null) {
+            Log.i(TAG, "Clicking hotspot row to enter sub-screen...")
+            if (clickableRow.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                currentStep = Step.SUB_SCREEN
+                depthCount = 2
+                Log.i(TAG, "Transitioned to SUB_SCREEN, waiting for sub-screen nodes...")
+            }
         }
     }
 
     private fun handleSubScreen(root: AccessibilityNodeInfo, service: ConcAccessibilityService) {
-        val subSwitch = findSubScreenSwitch(root)
-        if (subSwitch != null && subSwitch.clickAncestral()) {
-            Log.d(TAG, "Sub-screen switch clicked")
-            finishWithFeedback(service)
+        // サブ画面（WifiTetherSettings）
+        // 1. 「使用」や「有効」テキストの近くのSwitchを探す
+        for (kw in SUB_SCREEN_KEYWORDS) {
+            val nodes = root.findAccessibilityNodeInfosByText(kw)
+            for (node in nodes) {
+                val sw = node.findNearbySwitch() ?: node.findClickableAncestor()
+                if (sw != null) {
+                    Log.i(TAG, "Found switch near sub-screen keyword '$kw', clicking...")
+                    if (sw.clickAncestral()) {
+                        finishWithFeedback(service)
+                        return
+                    }
+                }
+            }
+        }
+
+        // 2. サブ画面内の最初のSwitchを探してクリック
+        val firstSwitch = root.findFirstSwitch()
+        if (firstSwitch != null) {
+            Log.i(TAG, "Found first switch in sub-screen, clicking...")
+            if (firstSwitch.clickAncestral()) {
+                finishWithFeedback(service)
+                return
+            }
         }
     }
 
-    private fun findHotspotSwitch(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        for (keyword in HOTSPOT_KEYWORDS) {
-            for (node in root.findAccessibilityNodeInfosByText(keyword)) {
-                val sw = node.findNearbySwitch()
-                if (sw != null) return sw
+    private fun findWifiHotspotTitleNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        for (exact in HOTSPOT_EXACT_TITLES) {
+            val list = root.findAccessibilityNodeInfosByText(exact)
+            for (node in list) {
+                val text = node.text?.toString() ?: continue
+                if (text.equals(exact, ignoreCase = true) || text.startsWith(exact, ignoreCase = true)) {
+                    if (text.length <= exact.length + 5) {
+                        return node
+                    }
+                }
             }
         }
         return null
-    }
-
-    private fun findHotspotNavigationItem(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        for (keyword in HOTSPOT_KEYWORDS) {
-            for (node in root.findAccessibilityNodeInfosByText(keyword)) {
-                val clickable = node.findClickableAncestor()
-                if (clickable != null) return clickable
-            }
-        }
-        return null
-    }
-
-    private fun findSubScreenSwitch(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        for (keyword in SUB_SCREEN_KEYWORDS) {
-            for (node in root.findAccessibilityNodeInfosByText(keyword)) {
-                val sw = node.findNearbySwitch()
-                if (sw != null) return sw
-            }
-        }
-        return root.findFirstSwitch()
     }
 
     private fun finishWithFeedback(service: ConcAccessibilityService) {
+        Log.i(TAG, "Hotspot toggled successfully! Triggering feedback and navigating back...")
         currentStep = Step.COMPLETED
         mainHandler.removeCallbacks(timeoutRunnable)
+        mainHandler.removeCallbacks(pollRunnable)
 
         HapticHelper.performClickFeedback(service)
 
@@ -149,15 +205,16 @@ class TetherToggleAction : AutomationAction {
         mainHandler.postDelayed({
             for (i in 0 until depthCount) {
                 mainHandler.postDelayed({
+                    Log.d(TAG, "Performing back key (${i + 1}/$depthCount)")
                     service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                }, (i * 120).toLong())
+                }, (i * 200).toLong())
             }
             isRunning = false
-        }, 150)
+        }, 250)
     }
 
     override fun onTimeout(service: ConcAccessibilityService) {
-        Log.w(TAG, "Operation timed out. Resetting.")
+        Log.w(TAG, "Operation timed out. Resetting state.")
         cancel()
     }
 
@@ -165,28 +222,29 @@ class TetherToggleAction : AutomationAction {
         isRunning = false
         currentStep = Step.COMPLETED
         mainHandler.removeCallbacks(timeoutRunnable)
+        mainHandler.removeCallbacks(pollRunnable)
     }
 
     companion object {
         const val ACTION_ID = "tether_toggle"
         private const val TAG = "TetherToggleAction"
-        private const val TIMEOUT_MS = 3000L
+        private const val TIMEOUT_MS = 6000L
+        private const val POLL_INTERVAL_MS = 120L
 
-        private val HOTSPOT_KEYWORDS = listOf(
+        private val HOTSPOT_EXACT_TITLES = listOf(
             "Wi-Fi アクセス ポイント",
             "Wi-Fiアクセスポイント",
-            "Wi-Fi テザリング",
-            "Wi-Fiテザリング",
-            "アクセス ポイント",
             "Wi-Fi hotspot",
             "Wi‑Fi hotspot",
-            "Hotspot",
-            "Tethering & portable hotspot"
+            "Wi-Fi テザリング",
+            "Wi-Fiテザリング",
+            "Portable hotspot"
         )
 
         private val SUB_SCREEN_KEYWORDS = listOf(
             "Wi-Fi アクセス ポイントの使用",
             "アクセス ポイントの使用",
+            "Wi-Fiテザリングの使用",
             "Use Wi-Fi hotspot",
             "Use hotspot"
         )

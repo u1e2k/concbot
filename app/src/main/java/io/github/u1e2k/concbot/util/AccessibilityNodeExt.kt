@@ -1,11 +1,64 @@
 package io.github.u1e2k.concbot.util
 
+import android.accessibilityservice.AccessibilityService
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * AccessibilityNodeInfo 操作に関する拡張関数群。
- * 各アクション実装から低レベルなノード走査・クリックロジックを分離します。
  */
+
+/**
+ * 画面のアクティブルートノードを多角的に取得する。
+ * targetPackage が指定されている場合、そのパッケージのウィンドウが現れるまで待機（他アプリウィンドウの誤認を防止）。
+ */
+fun getActiveRootNode(
+    service: AccessibilityService,
+    event: AccessibilityEvent?,
+    targetPackage: String? = null
+): AccessibilityNodeInfo? {
+    try {
+        val windows = service.windows
+
+        // 1. targetPackage が指定されている場合、そのパッケージのウィンドウのみを厳格に探索
+        if (targetPackage != null) {
+            for (w in windows) {
+                val r = w.root
+                if (r != null && r.packageName?.toString() == targetPackage) {
+                    return r
+                }
+            }
+            // event.source が対象パッケージの場合
+            val eventSource = event?.source
+            if (eventSource != null && eventSource.packageName?.toString() == targetPackage) {
+                return eventSource
+            }
+            // まだ対象パッケージが開いていない場合は null を返しリトライさせる
+            return null
+        }
+
+        // targetPackage 未指定時のフォールバック
+        for (w in windows) {
+            if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                val r = w.root
+                if (r != null && r.packageName?.toString() != "com.android.systemui") return r
+            }
+        }
+
+        for (w in windows) {
+            if (w.isActive || w.isFocused) {
+                val r = w.root
+                if (r != null && r.packageName?.toString() != "com.android.systemui") return r
+            }
+        }
+    } catch (t: Throwable) {
+        Log.w("AccessibilityNodeExt", "Error getting active root node", t)
+    }
+
+    return null
+}
 
 /**
  * ノード自身が Switch / Toggle などの切り替え可能要素であるかを判定
@@ -41,16 +94,23 @@ fun AccessibilityNodeInfo.findClickableAncestor(): AccessibilityNodeInfo? {
 }
 
 /**
- * ノード自身または同一階層・親コンテナの周辺にある Switch ノードを探索
+ * ノード自身または同一の行（Preferenceアイテム内）にある Switch ノードを探索
  */
 fun AccessibilityNodeInfo.findNearbySwitch(): AccessibilityNodeInfo? {
     if (this.isSwitchNode()) return this
 
     val parentNode = this.parent ?: return null
+    val parentClass = parentNode.className?.toString() ?: ""
+    if (parentClass.contains("Recycler") || parentClass.contains("List") || parentClass.contains("Scroll")) {
+        return null
+    }
+    if (parentNode.childCount > 6) {
+        return null
+    }
+
     for (i in 0 until parentNode.childCount) {
         val sibling = parentNode.getChild(i) ?: continue
         if (sibling.isSwitchNode()) return sibling
-        // 孫要素にある場合
         for (j in 0 until sibling.childCount) {
             val grandChild = sibling.getChild(j) ?: continue
             if (grandChild.isSwitchNode()) return grandChild

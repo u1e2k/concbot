@@ -20,6 +20,14 @@ class ConcAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.i(TAG, "ConcAccessibilityService connected")
+
+        // 接続待ちだったペンディングアクションがあれば即座に実行
+        val pending = pendingAction
+        if (pending != null) {
+            Log.i(TAG, "Executing pending action: ${pending.id}")
+            pendingAction = null
+            submitAction(pending, applicationContext)
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -64,6 +72,9 @@ class ConcAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: ConcAccessibilityService? = null
             private set
+
+        @Volatile
+        var pendingAction: AutomationAction? = null
 
         /**
          * システム設定を参照して、本サービスが有効になっているかを判定
