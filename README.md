@@ -50,8 +50,13 @@ flowchart TD
    - `ActionDispatcher`: アクション ID に対応する `AutomationAction` を生成し、`ConcAccessibilityService` に実行を委譲。
 3. **Action / Execution層 (`io.github.u1e2k.concbot.action`, `io.github.u1e2k.concbot.service`)**:
    - `AutomationAction`: 各自動化操作の共通インターフェース。
-   - `TetherToggleAction`: 設定画面の起動、ノード探索、スイッチ切り替え、触覚フィードバック、元画面復帰、タイムアウト処理を制御。
+   - `TetherToggleAction`: 設定画面の起動、ノード探索、スイッチ切り替え、触覚フィードバック、元画面復帰、タイムアウト処理のステートマシンを制御。
+   - `TetherSettingsLauncher`: Pixel 等の Android 端末でテザリング設定を起動する Intent 解決。
    - `ConcAccessibilityService`: Android OS から画面イベントを受け取り、実行中アクションに仲介。
+4. **共通ユーティリティ層 (`io.github.u1e2k.concbot.util`)**:
+   - `AccessibilityNodeExt`: AccessibilityNodeInfo の走査・スイッチ判定・クリック等の拡張関数群。
+   - `NdefHelper`: NDEF メッセージの生成・タグ書き込み・URI 抽出ロジック。
+   - `HapticHelper`: 軽快なクリックフィードバック（バイブレーション）の制御。
 
 ---
 
