@@ -118,16 +118,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         val targetUri = "concbot://action/${TetherToggleAction.ACTION_ID}"
         val message = NdefHelper.createUriMessage(targetUri)
-        val success = NdefHelper.writeMessage(tag, message)
+        val result = NdefHelper.writeMessage(tag, message)
 
         runOnUiThread {
-            if (success) {
-                HapticHelper.performClickFeedback(this)
-                Toast.makeText(this, R.string.nfc_write_success, Toast.LENGTH_LONG).show()
-                binding.tvNfcStatus.text = "書き込み完了: $targetUri"
-                toggleNfcWriteMode()
-            } else {
-                Toast.makeText(this, getString(R.string.nfc_write_failed, "書き込み失敗"), Toast.LENGTH_SHORT).show()
+            when (result) {
+                is NdefHelper.WriteResult.Success -> {
+                    HapticHelper.performClickFeedback(this)
+                    Toast.makeText(this, R.string.nfc_write_success, Toast.LENGTH_LONG).show()
+                    binding.tvNfcStatus.text = "書き込み完了: $targetUri"
+                    toggleNfcWriteMode()
+                }
+                is NdefHelper.WriteResult.Error -> {
+                    binding.tvNfcStatus.text = "エラー: ${result.message}"
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

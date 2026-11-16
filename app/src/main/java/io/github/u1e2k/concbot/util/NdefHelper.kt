@@ -6,6 +6,7 @@ import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.nfc.tech.MifareUltralight
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
 import android.os.Build
@@ -13,11 +14,16 @@ import android.os.Parcelable
 import android.util.Log
 
 /**
- * NFC (NDEF) 関連の処理（メッセージ生成・書き込み・抽出）を統括するヘルパー。
+ * NFC (NDEF) 関連の処理（メッセージ生成・書き込み・抽出・診断）を統括するヘルパー。
  */
 object NdefHelper {
 
     private const val TAG = "NdefHelper"
+
+    sealed class WriteResult {
+        object Success : WriteResult()
+        data class Error(val message: String) : WriteResult()
+    }
 
     /**
      * 指定された URI を持つ NdefMessage を生成
@@ -30,24 +36,30 @@ object NdefHelper {
     /**
      * NFC タグに NdefMessage を書き込む（Ndef または NdefFormatable に対応）
      */
-    fun writeMessage(tag: Tag, message: NdefMessage): Boolean {
+    fun writeMessage(tag: Tag, message: NdefMessage): WriteResult {
+        val techList = tag.techList.map { it.substringAfterLast('.') }
+        Log.i(TAG, "Discovered Tag TechList: $techList")
+
         val ndef = Ndef.get(tag)
         if (ndef != null) {
             try {
                 ndef.connect()
                 if (!ndef.isWritable) {
-                    Log.w(TAG, "Tag is not writable")
-                    return false
+                    val msg = "タグが書き込み保護（読み取り専用）されています"
+                    Log.w(TAG, msg)
+                    return WriteResult.Error(msg)
                 }
                 if (ndef.maxSize < message.byteArrayLength) {
-                    Log.w(TAG, "Tag capacity too small (${ndef.maxSize} < ${message.byteArrayLength})")
-                    return false
+                    val msg = "タグの容量不足です (最大: ${ndef.maxSize}B, 必要: ${message.byteArrayLength}B)"
+                    Log.w(TAG, msg)
+                    return WriteResult.Error(msg)
                 }
                 ndef.writeNdefMessage(message)
-                return true
+                Log.i(TAG, "Successfully wrote NDEF message via Ndef")
+                return WriteResult.Success
             } catch (t: Throwable) {
-                Log.e(TAG, "Error writing NDEF message", t)
-                return false
+                Log.e(TAG, "Error writing via Ndef", t)
+                return WriteResult.Error("書き込みエラー: ${t.localizedMessage ?: t.javaClass.simpleName}")
             } finally {
                 try { ndef.close() } catch (_: Throwable) {}
             }
@@ -58,17 +70,25 @@ object NdefHelper {
             try {
                 formatable.connect()
                 formatable.format(message)
-                return true
+                Log.i(TAG, "Successfully formatted and wrote NDEF message via NdefFormatable")
+                return WriteResult.Success
             } catch (t: Throwable) {
-                Log.e(TAG, "Error formatting and writing NDEF message", t)
-                return false
+                Log.e(TAG, "Error formatting via NdefFormatable", t)
+                return WriteResult.Error("フォーマット失敗: ${t.localizedMessage ?: t.javaClass.simpleName}")
             } finally {
                 try { formatable.close() } catch (_: Throwable) {}
             }
         }
 
-        Log.w(TAG, "Tag does not support NDEF or NdefFormatable")
-        return false
+        // NDEF非対応タグの場合（SuicaなどのFeliCaやMifare Classicなど）
+        val detailedTech = techList.joinToString(", ")
+        val errorReason = when {
+            detailedTech.contains("NfcF", ignoreCase = true) -> "交通系IC/電子マネー等のFeliCaタグには書き込めません (対応: NTAG213/215等)"
+            detailedTech.contains("MifareClassic", ignoreCase = true) -> "Mifare Classic タグは非対応です (NTAG系をご使用ください)"
+            else -> "NDEF規格非対応のタグです (検出: $detailedTech)"
+        }
+        Log.w(TAG, errorReason)
+        return WriteResult.Error(errorReason)
     }
 
     /**
